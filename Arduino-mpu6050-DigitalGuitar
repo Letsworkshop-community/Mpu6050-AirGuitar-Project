@@ -1,0 +1,138 @@
+#include <Wire.h>
+#include <I2Cdev.h>
+#include <MPU6050.h>
+#include <SoftwareSerial.h>
+#include <DFRobotDFPlayerMini.h>
+
+// ------------------ HARDWARE ------------------
+SoftwareSerial dfSerial(10, 11); // RX, TX
+DFRobotDFPlayerMini dfPlayer;
+
+MPU6050 mpu;
+
+// Touch sensor pins
+const int touchPins[3] = {2, 3, 4};
+
+// ------------------ MPU / STRUM ------------------
+int16_t ax, ay, az;
+int lastAy = 0;
+
+// Lower threshold for gentle movements
+const int STRUM_THRESHOLD = 2000;
+
+int activeChord = 0;   // 0 = none, 1–3 = chord selected
+bool strumReady = true;
+
+unsigned long lastDebugTime = 0;
+
+// MPU freeze detection
+int zeroCount = 0;
+const int ZERO_THRESHOLD = 5;
+
+void setup() {
+  Serial.begin(9600);
+  dfSerial.begin(9600);
+
+  // Touch sensor pins
+  for (int i = 0; i < 3; i++) pinMode(touchPins[i], INPUT);
+
+  Wire.begin();
+  initializeMPU();
+
+  if (!dfPlayer.begin(dfSerial)) {
+    Serial.println("❌ DFPlayer error");
+    while (true);
+  }
+
+  dfPlayer.volume(25);
+  Serial.println("🎵 DFPlayer ready");
+  Serial.println("🎸 Digital Guitar Ready");
+}
+
+void loop() {
+
+  // -------- TOUCH SENSOR CHECK --------
+  activeChord = 0;
+  for (int i = 0; i < 3; i++) {
+    if (digitalRead(touchPins[i]) == HIGH) {
+      activeChord = i + 1;
+      break;
+    }
+  }
+
+  // -------- IF NO TOUCH → RESET & IGNORE MPU --------
+  if (activeChord == 0) {
+    strumReady = true;
+    return;
+  }
+
+  // -------- MPU6050 READ & RECOVERY --------
+  if (!readMPU()) {
+    // MPU unresponsive, try re-initialize
+    initializeMPU();
+    delay(50); // stabilize
+    return;
+  }
+
+  int deltaY = ay - lastAy;
+  lastAy = ay;
+
+  // -------- DEBUG OUTPUT --------
+  if (millis() - lastDebugTime > 500) {
+    Serial.print("MPU ay: ");
+    Serial.print(ay);
+    Serial.print(" | deltaY: ");
+    Serial.println(deltaY);
+    lastDebugTime = millis();
+  }
+
+  // -------- STRUM DETECTION --------
+  if (abs(deltaY) > STRUM_THRESHOLD && strumReady) {
+    Serial.print("🎸 Strum detected | Chord ");
+    Serial.println(activeChord);
+
+    dfPlayer.stop();
+    delay(20);
+    dfPlayer.play(activeChord);
+
+    strumReady = false;
+  }
+
+  // Reset strumReady if motion settles (small movements)
+  if (!strumReady && abs(deltaY) < 200) strumReady = true;
+
+  delay(10);
+}
+
+// ------------------ FUNCTIONS ------------------
+
+bool readMPU() {
+  mpu.getAcceleration(&ax, &ay, &az);
+
+  // Detect MPU freeze
+  if (ax == 0 && ay == 0 && az == 0) {
+    zeroCount++;
+    if (zeroCount >= ZERO_THRESHOLD) {
+      Serial.println("⚠️ MPU6050 unresponsive, attempting re-init...");
+      zeroCount = 0;
+      return false;
+    }
+  } else {
+    zeroCount = 0; // reset counter if MPU is responsive
+  }
+
+  return true;
+}
+
+void initializeMPU() {
+  mpu.initialize();
+  if (!mpu.testConnection()) {
+    Serial.println("❌ MPU6050 NOT connected");
+  } else {
+    Serial.println("✅ MPU6050 connected / re-initialized");
+  }
+
+  // Read baseline
+  mpu.getAcceleration(&ax, &ay, &az);
+  lastAy = ay;
+}
